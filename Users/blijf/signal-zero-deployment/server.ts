@@ -4,6 +4,61 @@ import { Server } from 'socket.io';
 import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs/promises';
 
+type ApiConfig = {
+    provider: string;
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+    status: string;
+};
+
+type MultiModelConfig = ApiConfig & {
+    id?: string;
+};
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function createRunnerCode(prompt: string, outputPath: string, contextPath: string, config: Omit<ApiConfig, 'apiKey' | 'status'>): string {
+    return [
+        "import { executeTestSwarm } from './v2-errorhandling';",
+        'const apiConfig = {',
+        `    provider: ${JSON.stringify(config.provider)},`,
+        `    model: ${JSON.stringify(config.model)},`,
+        `    baseUrl: ${JSON.stringify(config.baseUrl)},`,
+        "    apiKey: process.env.SWARM_API_KEY || ''",
+        '};',
+        `executeTestSwarm(${JSON.stringify(prompt)}, ${JSON.stringify(outputPath)}, ${JSON.stringify(contextPath)}, apiConfig)`,
+        '    .then(() => process.exit(0))',
+        '    .catch((err) => { console.error(err); process.exit(1); });',
+        ''
+    ].join('\n');
+}
+
+function spawnRunner(runnerFile: string, apiKey = ''): ChildProcess {
+    return spawn(process.execPath, ['--loader', 'ts-node/esm', '--experimental-specifier-resolution=node', runnerFile], {
+        env: { ...process.env, SWARM_API_KEY: apiKey },
+        windowsHide: true
+    });
+}
+
+// Load environment variables from .env file
+async function initEnv() {
+    try {
+        const dotenv = await import('dotenv');
+        if (dotenv.config) {
+            dotenv.config();
+        } else if (dotenv.default && dotenv.default.config) {
+            dotenv.default.config();
+        }
+    } catch (e) {
+        console.log('⚠️ dotenv not configured, proceeding with existing environment');
+    }
+}
+
+await initEnv();
+
 const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer);
@@ -13,7 +68,7 @@ app.use(express.json());
 let activeProcess: ChildProcess | null = null;
 let activeProcesses: Map<string, ChildProcess> = new Map();
 
-let apiConfig = {
+let apiConfig: ApiConfig = {
     provider: 'openai',
     apiKey: '',
     baseUrl: 'https://api.openai.com/v1',
@@ -22,7 +77,7 @@ let apiConfig = {
 };
 
 // Multiple API configs for parallel execution
-let multiApiConfigs: Array<{id: string, provider: string, model: string, apiKey: string, baseUrl: string, status: string}> = [];
+let multiApiConfigs: MultiModelConfig[] = [];
 
 const API_CONFIG_FILE = 'api-config.json';
 
@@ -31,10 +86,101 @@ async function loadApiConfig() {
     try {
         const data = await fs.readFile(API_CONFIG_FILE, 'utf-8');
         const loaded = JSON.parse(data);
-        apiConfig = { ...apiConfig, ...loaded };
-        console.log('API config loaded:', { ...apiConfig, apiKey: '***' });
+        
+        // If api-config.json has apiConfigs array, use primary config
+        if (loaded.apiConfigs && Array.isArray(loaded.apiConfigs)) {
+            multiApiConfigs = loaded.apiConfigs;
+            if (loaded.primary) {
+                apiConfig = { ...apiConfig, ...loaded.primary };
+            } else if (loaded.apiConfigs.length > 0) {
+                apiConfig = { ...apiConfig, ...loaded.apiConfigs[0] };
+            }
+        } else {
+            apiConfig = { ...apiConfig, ...loaded };
+        }
+        
+        console.log('✅ API config loaded:', { ...apiConfig, apiKey: '***' });
+        console.log(`📋 Available API configs: ${multiApiConfigs.length}`);
     } catch (error) {
-        console.log('No saved API config found, using defaults.');
+        // Try to load from environment variables
+        console.log('📌 Loading API configuration from environment variables...');
+        
+        // Try OpenAI first (most common)
+        if (process.env.OPENAI_API_KEY) {
+            apiConfig = {
+                provider: 'openai',
+                apiKey: process.env.OPENAI_API_KEY,
+                baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+                model: process.env.OPENAI_MODEL || 'gpt-5.5',
+                status: 'configured'
+            };
+            console.log('✅ Loaded OpenAI from .env');
+        }
+        
+        // Build multi-config from environment
+        const envConfigs: Array<{id: string, provider: string, model: string, apiKey: string, baseUrl: string, status: string}> = [];
+        
+        if (process.env.OPENAI_API_KEY) {
+            envConfigs.push({
+                id: 'openai-primary',
+                provider: 'openai',
+                model: process.env.OPENAI_MODEL || 'gpt-5.5',
+                apiKey: process.env.OPENAI_API_KEY,
+                baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+                status: 'configured'
+            });
+        }
+        
+        if (process.env.OPENROUTER_API_KEY_PRIMARY) {
+            envConfigs.push({
+                id: 'openrouter-primary',
+                provider: 'openrouter',
+                model: 'openrouter-gpt-5.5',
+                apiKey: process.env.OPENROUTER_API_KEY_PRIMARY,
+                baseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+                status: 'configured'
+            });
+        }
+        
+        if (process.env.MISTRAL_API_KEY) {
+            envConfigs.push({
+                id: 'mistral-primary',
+                provider: 'mistral',
+                model: 'mistral-large',
+                apiKey: process.env.MISTRAL_API_KEY,
+                baseUrl: process.env.MISTRAL_BASE_URL || 'https://api.mistral.ai/v1',
+                status: 'configured'
+            });
+        }
+        
+        if (process.env.GROQ_API_KEY) {
+            envConfigs.push({
+                id: 'groq-primary',
+                provider: 'groq',
+                model: 'groq-llama-3.1',
+                apiKey: process.env.GROQ_API_KEY,
+                baseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+                status: 'configured'
+            });
+        }
+        
+        if (process.env.GOOGLE_API_KEY) {
+            envConfigs.push({
+                id: 'google-primary',
+                provider: 'google',
+                model: 'gemini-3.1',
+                apiKey: process.env.GOOGLE_API_KEY,
+                baseUrl: process.env.GOOGLE_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta',
+                status: 'configured'
+            });
+        }
+        
+        if (envConfigs.length > 0) {
+            multiApiConfigs = envConfigs;
+            console.log(`✅ Loaded ${envConfigs.length} API configurations from .env`);
+        } else {
+            console.log('⚠️  No API config found, using defaults.');
+        }
     }
 }
 
@@ -446,10 +592,25 @@ const htmlContent = `
             stderrConsole.textContent = '';
             setUIState('running');
 
-            await fetch('/api/start', {
+            const hasMultiModels = multiModels.length > 0;
+            const selectedMultiModels = hasMultiModels ? [...multiModels] : [];
+            if (hasMultiModels) {
+                multiModels = [];
+            }
+            if (hasMultiModels) {
+                stdoutConsole.textContent += '\n[System] Starting Swarm with ' + selectedMultiModels.length + ' models in parallel...\n';
+                stdoutConsole.textContent += '[System] Models: ' + selectedMultiModels.map(m => m.model).join(', ') + '\n\n';
+            }
+
+            await fetch(hasMultiModels ? '/api/start-multi' : '/api/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+                body: JSON.stringify(hasMultiModels ? {
+                    script: scriptSelect.value,
+                    prompt: prompt,
+                    context: contextInput.value,
+                    multiModels: selectedMultiModels
+                } : {
                     script: scriptSelect.value,
                     prompt: prompt,
                     context: contextInput.value,
@@ -457,6 +618,7 @@ const htmlContent = `
                     apiModel: apiModel.value
                 })
             });
+
         });
 
         btnStop.addEventListener('click', async () => {
@@ -586,7 +748,7 @@ app.post('/api/test', async (req, res) => {
 
         if (provider === 'openai') {
             try {
-                const url = (baseUrl || 'https://api.openai.com/v1') + '/models/' + model;
+                const url = (baseUrl || 'https://api.openai.com/v1') + '/models';
                 const response = await fetch(url, {
                     headers: {
                         'Authorization': 'Bearer ' + apiKey,
@@ -595,11 +757,11 @@ app.post('/api/test', async (req, res) => {
                 });
                 testResult = response.ok;
                 if (!testResult) {
-                    const error = await response.json();
+                    const error = await response.json() as { error?: { message?: string } };
                     errorMessage = error.error?.message || 'Invalid API Key';
                 }
             } catch (error) {
-                errorMessage = error.message;
+                errorMessage = getErrorMessage(error);
             }
         } else if (provider === 'anthropic') {
             try {
@@ -614,7 +776,7 @@ app.post('/api/test', async (req, res) => {
                     errorMessage = 'Invalid Anthropic API Key';
                 }
             } catch (error) {
-                errorMessage = error.message;
+                errorMessage = getErrorMessage(error);
             }
         } else if (provider === 'google') {
             try {
@@ -625,7 +787,7 @@ app.post('/api/test', async (req, res) => {
                     errorMessage = 'Invalid Google API Key';
                 }
             } catch (error) {
-                errorMessage = error.message;
+                errorMessage = getErrorMessage(error);
             }
         } else {
             testResult = true; // Custom/local API
@@ -652,7 +814,7 @@ app.post('/api/test', async (req, res) => {
     } catch (error) {
         res.status(500).json({
             success: false,
-            message: 'Error testing API: ' + error.message
+            message: 'Error testing API: ' + getErrorMessage(error)
         });
     }
 });
@@ -678,22 +840,16 @@ app.post('/api/start', async (req, res) => {
 
         await fs.writeFile('test-context.txt', context || 'Geen context', 'utf-8');
         
-        // Enhanced runner with API configuration
-        const sanitizedPrompt = prompt.replace(/`/g, '\\`');
-        const runnerCode = 'import { executeTestSwarm } from \'./v2-errorhandling\';\n' +
-            'const apiConfig = {\n' +
-            '    provider: \'' + apiProvider + '\',\n' +
-            '    model: \'' + apiModel + '\',\n' +
-            '    baseUrl: \'' + apiConfig.baseUrl + '\'\n' +
-            '};\n' +
-            'executeTestSwarm(`' + sanitizedPrompt + '`, \'./output/generated-module.ts\', \'./test-context.txt\', apiConfig)\n' +
-            '    .then(() => process.exit(0))\n' +
-            '    .catch((err) => { console.error(err); process.exit(1); });';
+        const runnerCode = createRunnerCode(prompt, './output/generated-module.ts', './test-context.txt', {
+            provider: apiProvider,
+            model: apiModel,
+            baseUrl: apiConfig.baseUrl
+        });
             
         await fs.writeFile('temp-runner.ts', runnerCode, 'utf-8');
 
         // Start het proces
-        activeProcess = spawn('npx', ['ts-node', 'temp-runner.ts'], { env: process.env });
+        activeProcess = spawnRunner('temp-runner.ts', apiConfig.apiKey);
 
         activeProcess.stdout?.on('data', (data) => io.emit('stdout', data.toString()));
         activeProcess.stderr?.on('data', (data) => io.emit('stderr', data.toString()));
@@ -711,7 +867,7 @@ app.post('/api/start', async (req, res) => {
 
 // Start multiple models in parallel
 app.post('/api/start-multi', async (req, res) => {
-    const { prompt, context, multiModels } = req.body;
+    const { prompt, context, multiModels } = req.body as { prompt: string; context?: string; multiModels?: MultiModelConfig[] };
     
     if (!multiModels || multiModels.length === 0) {
         return res.status(400).json({ error: 'No models provided' });
@@ -719,7 +875,7 @@ app.post('/api/start-multi', async (req, res) => {
 
     try {
         io.emit('stdout', '\n[System] 🚀 Initiating parallel swarm with ' + multiModels.length + ' models (July 2026)\n');
-        io.emit('stdout', '[System] Models: ' + multiModels.map(m => m.model).join(', ') + '\n\n');
+        io.emit('stdout', '[System] Models: ' + multiModels.map((m) => m.model).join(', ') + '\n\n');
 
         await fs.writeFile('test-context.txt', context || 'Geen context', 'utf-8');
 
@@ -729,21 +885,15 @@ app.post('/api/start-multi', async (req, res) => {
             
             io.emit('stdout', '[System] ⚡ Starting [' + (index + 1) + '/' + multiModels.length + '] ' + modelConfig.provider + '/' + modelConfig.model + '...\n');
             
-            const sanitizedPrompt = prompt.replace(/`/g, '\\`');
-            const runnerCode = 'import { executeTestSwarm } from \'./v2-errorhandling\';\n' +
-                'const apiConfig = {\n' +
-                '    provider: \'' + modelConfig.provider + '\',\n' +
-                '    model: \'' + modelConfig.model + '\',\n' +
-                '    baseUrl: \'' + modelConfig.baseUrl + '\',\n' +
-                '    apiKey: \'' + modelConfig.apiKey + '\'\n' +
-                '};\n' +
-                'executeTestSwarm(`' + sanitizedPrompt + '`, \'./output/generated-module-' + index + '.ts\', \'./test-context.txt\', apiConfig)\n' +
-                '    .then(() => { console.log(\'[Process ' + processId + '] Completed\'); process.exit(0); })\n' +
-                '    .catch((err) => { console.error(\'[Process ' + processId + ']\', err); process.exit(1); });';
+            const runnerCode = createRunnerCode(prompt, './output/generated-module-' + index + '.ts', './test-context.txt', {
+                provider: modelConfig.provider,
+                model: modelConfig.model,
+                baseUrl: modelConfig.baseUrl
+            });
                 
             const runnerFile = 'temp-runner-' + index + '.ts';
             fs.writeFile(runnerFile, runnerCode, 'utf-8').then(() => {
-                const childProcess = spawn('npx', ['ts-node', runnerFile], { env: process.env });
+                const childProcess = spawnRunner(runnerFile, modelConfig.apiKey);
                 activeProcesses.set(processId, childProcess);
 
                 childProcess.stdout?.on('data', (data) => {
@@ -762,7 +912,7 @@ app.post('/api/start-multi', async (req, res) => {
 
         res.json({ message: 'Multi-model swarm gestart', models: multiModels.length });
     } catch (error) {
-        res.status(500).json({ error: 'Fout bij starten van multi-model swarm: ' + error.message });
+        res.status(500).json({ error: 'Fout bij starten van multi-model swarm: ' + getErrorMessage(error) });
     }
 });
 

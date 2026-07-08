@@ -5,7 +5,9 @@ dist/
 .DS_Store
 .env
 .env.local
+api-config.json
 test-context.txt
 temp-runner.ts
+temp-runner-*.ts
 output/
 .vscode/

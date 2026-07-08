@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "ES2020",
+    "module": "ES2022",
     "lib": ["ES2020"],
     "moduleResolution": "node",
     "esModuleInterop": true,
@@ -16,5 +16,5 @@
     "outDir": "./dist"
   },
   "include": ["*.ts"],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "temp-runner*.ts", "test-context.txt", "output"]
 }
