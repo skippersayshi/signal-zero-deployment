@@ -135,7 +135,7 @@ async function loadApiConfig() {
             envConfigs.push({
                 id: 'openrouter-primary',
                 provider: 'openrouter',
-                model: 'openrouter-gpt-5.5',
+                model: 'openai/gpt-5.5',
                 apiKey: process.env.OPENROUTER_API_KEY_PRIMARY,
                 baseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
                 status: 'configured'
@@ -146,7 +146,7 @@ async function loadApiConfig() {
             envConfigs.push({
                 id: 'mistral-primary',
                 provider: 'mistral',
-                model: 'mistral-large',
+                model: 'mistral-large-latest',
                 apiKey: process.env.MISTRAL_API_KEY,
                 baseUrl: process.env.MISTRAL_BASE_URL || 'https://api.mistral.ai/v1',
                 status: 'configured'
@@ -157,7 +157,7 @@ async function loadApiConfig() {
             envConfigs.push({
                 id: 'groq-primary',
                 provider: 'groq',
-                model: 'groq-llama-3.1',
+                model: 'llama-3.3-70b-versatile',
                 apiKey: process.env.GROQ_API_KEY,
                 baseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
                 status: 'configured'
@@ -168,7 +168,7 @@ async function loadApiConfig() {
             envConfigs.push({
                 id: 'google-primary',
                 provider: 'google',
-                model: 'gemini-3.1',
+                model: 'models/gemini-pro-latest',
                 apiKey: process.env.GOOGLE_API_KEY,
                 baseUrl: process.env.GOOGLE_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta',
                 status: 'configured'
@@ -274,8 +274,8 @@ const htmlContent = `
                             <option value="claude-haiku-3">Claude Haiku 3</option>
                         </optgroup>
                         <optgroup label="Google">
-                            <option value="gemini-3.1">Gemini 3.1 (Latest)</option>
-                            <option value="gemini-3-pro">Gemini 3 Pro</option>
+                            <option value="models/gemini-pro-latest">Gemini Pro Latest</option>
+                            <option value="models/gemini-2.5-pro">Gemini 2.5 Pro</option>
                             <option value="gemini-pro-vision">Gemini Pro Vision</option>
                         </optgroup>
                         <optgroup label="DeepSeek">
@@ -284,10 +284,10 @@ const htmlContent = `
                             <option value="deepseek-lite">DeepSeek Lite</option>
                         </optgroup>
                         <optgroup label="OpenRouter">
-                            <option value="openrouter-gpt-5.5">GPT-5.5 via OpenRouter</option>
-                            <option value="openrouter-opus-4.8">Claude Opus 4.8 via OpenRouter</option>
-                            <option value="openrouter-gemini-3.1">Gemini 3.1 via OpenRouter</option>
-                            <option value="openrouter-deepseek-4">DeepSeek 4 via OpenRouter</option>
+                            <option value="openai/gpt-5.5">GPT-5.5 via OpenRouter</option>
+                            <option value="anthropic/claude-opus-4.8">Claude Opus 4.8 via OpenRouter</option>
+                            <option value="google/gemini-3.1-pro-preview">Gemini 3.1 via OpenRouter</option>
+                            <option value="deepseek/deepseek-v4-pro">DeepSeek V4 via OpenRouter</option>
                         </optgroup>
                         <optgroup label="Random/Empty">
                             <option value="random-selected">🎲 Random Selection</option>
@@ -436,9 +436,9 @@ const htmlContent = `
             const models = {
                 openai: ['gpt-5.5', 'gpt-5-turbo', 'gpt-4o'],
                 anthropic: ['claude-opus-4.8', 'claude-sonnet-4', 'claude-haiku-3'],
-                google: ['gemini-3.1', 'gemini-3-pro', 'gemini-pro-vision'],
+                google: ['models/gemini-pro-latest', 'models/gemini-2.5-pro', 'models/gemini-2.5-flash'],
                 deepseek: ['deepseek-4-pro', 'deepseek-3.5', 'deepseek-lite'],
-                openrouter: ['openrouter-gpt-5.5', 'openrouter-opus-4.8', 'openrouter-gemini-3.1', 'openrouter-deepseek-4'],
+                openrouter: ['openai/gpt-5.5', 'anthropic/claude-opus-4.8', 'google/gemini-3.1-pro-preview', 'deepseek/deepseek-v4-pro'],
                 custom: ['local-model', 'random-selected', '-']
             };
             apiModel.innerHTML = '';
