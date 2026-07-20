@@ -1,11 +1,16 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
-type SwarmApiConfig = {
+export type SwarmApiConfig = {
     provider: string;
     model: string;
     baseUrl?: string;
     apiKey?: string;
+};
+
+export type OrchestratorRoleConfig = SwarmApiConfig & {
+    role: 'orchestrator' | 'builder' | 'reviewer';
+    label: string;
 };
 
 function getErrorMessage(error: unknown): string {
@@ -94,7 +99,8 @@ async function callAnthropic(prompt: string, context: string, config: SwarmApiCo
 
 async function callGoogle(prompt: string, context: string, config: SwarmApiConfig, apiKey: string): Promise<string> {
     const baseUrl = trimTrailingSlash(config.baseUrl || 'https://generativelanguage.googleapis.com/v1beta');
-    const response = await fetch(`${baseUrl}/models/${config.model}:generateContent?key=${apiKey}`, {
+    const model = config.model.replace(/^models\//, '');
+    const response = await fetch(`${baseUrl}/models/${model}:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -117,7 +123,7 @@ async function callGoogle(prompt: string, context: string, config: SwarmApiConfi
     return data.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n').trim() || '';
 }
 
-async function generateWithProvider(prompt: string, context: string, config: SwarmApiConfig): Promise<string | null> {
+export async function generateWithProvider(prompt: string, context: string, config: SwarmApiConfig): Promise<string | null> {
     const apiKey = getProviderKey(config);
     if (!apiKey) {
         console.log('[Signal-Zero] No API key available; writing local fallback output.');
@@ -137,6 +143,107 @@ async function generateWithProvider(prompt: string, context: string, config: Swa
         console.error('[Signal-Zero] Provider call failed:', getErrorMessage(error));
         return null;
     }
+}
+
+function requireRole(roles: OrchestratorRoleConfig[], role: OrchestratorRoleConfig['role']): OrchestratorRoleConfig {
+    const config = roles.find((item) => item.role === role);
+    if (!config) {
+        throw new Error(`Missing ${role} role configuration`);
+    }
+    return config;
+}
+
+function hasFailureSignal(review: string): boolean {
+    return /\b(fail|failed|reject|rejected|error|invalid|niet akkoord|afgekeurd)\b/i.test(review);
+}
+
+export async function executeOrchestratedSwarm(
+    prompt: string,
+    outputPath: string,
+    contextPath: string,
+    roles: OrchestratorRoleConfig[],
+    log: (message: string) => void = console.log
+): Promise<void> {
+    const context = await fs.readFile(contextPath, 'utf-8').catch(() => '');
+    const orchestrator = requireRole(roles, 'orchestrator');
+    const builder = requireRole(roles, 'builder');
+    const reviewer = requireRole(roles, 'reviewer');
+
+    log(`[Signal-Zero] Orchestrator: ${orchestrator.label} (${orchestrator.provider}/${orchestrator.model})`);
+    const blueprintPrompt = [
+        'You are the Signal-Zero Orchestrator.',
+        'Produce a compact technical blueprint. Do not write implementation code.',
+        'Separate assumptions, interfaces, implementation steps, validation criteria, and edge cases.',
+        '',
+        `User task:\n${prompt}`
+    ].join('\n');
+    const blueprint = await generateWithProvider(blueprintPrompt, context, orchestrator)
+        || createFallback(blueprintPrompt, context, orchestrator);
+
+    log(`[Signal-Zero] Builder: ${builder.label} (${builder.provider}/${builder.model})`);
+    const buildPrompt = [
+        'You are the Signal-Zero Builder.',
+        'Implement the requested TypeScript/Node output by following the blueprint exactly.',
+        'Return the implementation plus short notes about important decisions.',
+        '',
+        `Blueprint:\n${blueprint}`,
+        '',
+        `User task:\n${prompt}`
+    ].join('\n');
+    let implementation = await generateWithProvider(buildPrompt, context, builder)
+        || createFallback(buildPrompt, context, builder);
+
+    log(`[Signal-Zero] Reviewer: ${reviewer.label} (${reviewer.provider}/${reviewer.model})`);
+    const reviewPrompt = [
+        'You are the Signal-Zero Reviewer.',
+        'Audit the implementation against the original context and blueprint.',
+        'Return PASS when it satisfies the blueprint. Return FAIL plus concrete repair instructions otherwise.',
+        '',
+        `Blueprint:\n${blueprint}`,
+        '',
+        `Implementation:\n${implementation}`
+    ].join('\n');
+    const review = await generateWithProvider(reviewPrompt, context, reviewer)
+        || 'FAIL: reviewer unavailable; deterministic fallback requested a repair pass.';
+
+    let finalReview = review;
+    if (hasFailureSignal(review)) {
+        log('[Signal-Zero] Reviewer requested a repair pass.');
+        const repairPrompt = [
+            'You are the Signal-Zero Builder.',
+            'Repair the implementation using the reviewer feedback. Return the corrected implementation only.',
+            '',
+            `Blueprint:\n${blueprint}`,
+            '',
+            `Previous implementation:\n${implementation}`,
+            '',
+            `Reviewer feedback:\n${review}`
+        ].join('\n');
+        implementation = await generateWithProvider(repairPrompt, context, builder) || implementation;
+        finalReview = await generateWithProvider(
+            `Re-audit this repaired implementation. Return PASS or FAIL with concise reasons.\n\n${implementation}`,
+            context,
+            reviewer
+        ) || finalReview;
+    }
+
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.writeFile(
+        outputPath,
+        [
+            '// Generated by Signal-Zero orchestrator.',
+            `export const generatedAt = ${JSON.stringify(new Date().toISOString())};`,
+            `export const roles = ${JSON.stringify(roles.map(({ role, label, provider, model }) => ({ role, label, provider, model })), null, 2)};`,
+            `export const prompt = ${JSON.stringify(prompt)};`,
+            `export const blueprint = ${JSON.stringify(blueprint)};`,
+            `export const implementation = ${JSON.stringify(implementation)};`,
+            `export const review = ${JSON.stringify(finalReview)};`,
+            ''
+        ].join('\n'),
+        'utf-8'
+    );
+
+    log(`[Signal-Zero] Orchestrated output written to ${outputPath}`);
 }
 
 function createFallback(prompt: string, context: string, config: SwarmApiConfig): string {
